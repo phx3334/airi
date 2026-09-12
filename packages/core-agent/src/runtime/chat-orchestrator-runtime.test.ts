@@ -1216,10 +1216,11 @@ describe('createChatOrchestratorRuntime', () => {
         { language: 'zh', pairId: 0, text: ' 你好\n' },
         { language: 'zh', pairId: 1, text: ' 再见' },
       ])
-      // The stored bubble keeps both languages but no control tags.
-      expect(assistant.content).toBe(' Hello\n 你好\n Bye\n 再见')
+      // Translations are subtitle-only. The bubble and stored history keep
+      // the spoken reply without tags or translations.
+      expect(assistant.content).toBe(' Hello\n Bye\n')
       const textSlices = assistant.slices.filter(slice => slice.type === 'text')
-      expect(textSlices.map(slice => slice.text).join('')).toBe(' Hello\n 你好\n Bye\n 再见')
+      expect(textSlices.map(slice => slice.text).join('')).toBe(' Hello\n Bye\n')
     })
 
     it('keeps the byte-for-byte path when no snapshot is configured', async () => {
@@ -1253,9 +1254,11 @@ describe('createChatOrchestratorRuntime', () => {
         { spokenLanguage: 'en', translationLanguages: ['zh'] },
         ['[EN] Hello\n[ZH] ni\n[EN'],
       ).then(({ assistant, literalEvents, translationEvents }) => {
+        // Translation fragments reach the subtitle track; the truncated tail
+        // stays visible in the message but is never sent to TTS.
         expect(literalEvents.join('')).toBe(' Hello\n')
-        expect(translationEvents.at(-1)?.text).toBe('[EN')
-        expect(assistant.content).toBe(' Hello\n ni\n[EN')
+        expect(translationEvents.map(event => event.text).join('')).toBe(' ni\n')
+        expect(assistant.content).toBe(' Hello\n[EN')
       })
     })
 

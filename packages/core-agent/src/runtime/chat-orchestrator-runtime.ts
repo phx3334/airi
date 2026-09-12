@@ -719,25 +719,22 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         }
       }
 
-      // Routes one splitter event. Spoken text goes to the bubble and to TTS;
-      // translation text goes to the bubble and the subtitle hook only.
-      // Whitespace-only spoken text still reaches the bubble so the projected
-      // message keeps the model's line breaks, but TTS never receives it.
+      // Spoken text stays on the chat surface: bubble, slices, stored history,
+      // and the TTS literal hook. Translation text is subtitle-only and never
+      // reaches the chat message, so history keeps just the spoken reply.
       async function applyBilingualEvent(event: BilingualTurnEvent): Promise<boolean> {
-        if (event.kind === 'spoken') {
-          appendTextToBuildingMessage(event.text)
-          if (!event.text.trim())
-            return true
-          await hooks.emitTokenLiteralHooks(event.text, streamingMessageContext)
-          return true
+        if (event.kind === 'translation') {
+          await hooks.emitTokenTranslationHooks({
+            language: event.language,
+            pairId: event.pairId,
+            text: event.text,
+          }, streamingMessageContext)
+          return false
         }
 
         appendTextToBuildingMessage(event.text)
-        await hooks.emitTokenTranslationHooks({
-          language: event.language,
-          pairId: event.pairId,
-          text: event.text,
-        }, streamingMessageContext)
+        if (event.text.trim())
+          await hooks.emitTokenLiteralHooks(event.text, streamingMessageContext)
         return true
       }
 
@@ -1006,14 +1003,16 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
         return
 
       // Release a tag candidate still held at stream end, for example an
-      // unclosed `[EN`. It lands on whichever track was active, so route it
-      // through the normal branches instead of dropping non-spoken bytes.
+      // unclosed `[EN`. Append it to the message so truncated bytes stay
+      // visible, but never send it to TTS or the subtitle track.
       if (bilingual) {
-        let tailChanged = false
-        for (const event of bilingual.end())
-          tailChanged = (await applyBilingualEvent(event)) || tailChanged
-        if (tailChanged)
+        const tail = bilingual.end()
+          .map(event => event.text)
+          .join('')
+        if (tail) {
+          appendTextToBuildingMessage(tail)
           updateStream(sessionId, buildingMessage)
+        }
       }
 
       buildingMessage.providerTranscript = providerTranscript
