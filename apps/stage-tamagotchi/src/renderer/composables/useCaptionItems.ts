@@ -9,6 +9,8 @@ export interface CaptionItem {
   type: CaptionChannelEvent['type']
   /** Text payload rendered by the overlay. */
   text: string
+  /** Native language name for the translation line, for example `中文`. */
+  label?: string
 }
 
 export interface UseCaptionItemsOptions {
@@ -80,6 +82,7 @@ export function useCaptionItems(options: UseCaptionItemsOptions = {}) {
         id: nextId++,
         type: event.type,
         text: event.text,
+        ...(event.label ? { label: event.label } : {}),
       }
       items.value = [...items.value, item]
       scheduleExpiry(item)
@@ -89,7 +92,13 @@ export function useCaptionItems(options: UseCaptionItemsOptions = {}) {
     for (const item of matchedItems)
       clearTimer(item.id)
 
-    const replacement = { ...currentItem, text: event.text }
+    // Reflect the event label exactly. A multi-language event sends no label
+    // and renders inline names, so a previous single-language badge is removed.
+    const replacement: CaptionItem = {
+      ...currentItem,
+      text: event.text,
+      ...(event.label ? { label: event.label } : { label: undefined }),
+    }
     items.value = items.value
       .filter(item => item.type !== event.type || item.id === currentItem.id)
       .map(item => item.id === currentItem.id ? replacement : item)
@@ -111,6 +120,7 @@ export function useCaptionItems(options: UseCaptionItemsOptions = {}) {
       id: nextId++,
       type: event.type,
       text: event.text,
+      ...(event.label ? { label: event.label } : {}),
     }
     items.value = [...items.value, item]
     scheduleExpiry(item)

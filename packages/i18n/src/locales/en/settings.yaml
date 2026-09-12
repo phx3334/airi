@@ -546,6 +546,21 @@ pages:
           description: Configure 3D VRM models and settings
         scene: Scene
   modules:
+    bilingual_subtitles:
+      title: Bilingual subtitles
+      description: Speak one language and show translated subtitles
+      enable:
+        label: Enable bilingual subtitles
+        description: AIRI speaks in the spoken language and adds translations in the caption window.
+      spoken_language:
+        label: Spoken language (text-to-speech)
+        description: The language that text-to-speech reads aloud.
+      subtitle_language_1:
+        label: Subtitle language 1
+      subtitle_language_2:
+        label: Subtitle language 2
+      none: None
+      voice_warning: The selected text-to-speech voice may not support the spoken language. Check the voice in Speech settings.
     beat_sync:
       description: Vibe with beats from the audio source
       title: Beat Sync

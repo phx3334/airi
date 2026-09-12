@@ -1,3 +1,4 @@
+import type { BilingualTurnEvent, BilingualTurnSnapshot, BilingualTurnSplitter } from '@proj-airi/pipelines-audio'
 import type { ChatProvider } from '@xsai-ext/providers/utils'
 import type { CommonContentPart, Message, ToolMessage } from '@xsai/shared-chat'
 
@@ -6,6 +7,7 @@ import type { AgentForegroundStreamPort } from '../contracts/stream-port'
 import type { ChatAssistantMessage, ChatHistoryItem, ChatSlices, ChatStreamEventContext, ChatToolReference, ContextMessage, ErrorMessage, StreamingAssistantMessage } from '../types/chat'
 import type { LlmUsage, StreamEvent, StreamOptions } from '../types/llm'
 
+import { createBilingualTurnSplitter } from '@proj-airi/pipelines-audio'
 import { createQueue } from '@proj-airi/stream-kit'
 
 import { formatContextPromptText } from '../messages/context-prompt'
@@ -250,6 +252,12 @@ export interface ChatOrchestratorRuntimeDeps {
   getActiveProvider: () => string | undefined
   /** Returns optional prompt text appended to the provider system message for this send. */
   getSystemPromptSupplement?: () => string | undefined
+  /**
+   * Returns the bilingual snapshot for this send. Read once per send so that
+   * settings changes do not affect an in-flight response. Undefined disables
+   * splitting and leaves the text path unchanged.
+   */
+  getBilingualSnapshot?: () => BilingualTurnSnapshot | undefined
   /** Runtime context providers ingested immediately before prompt composition. */
   runtimeContextProviders?: Array<() => ContextMessage | null | undefined>
   /** Clock used for persisted message timestamps. @default Date.now */
@@ -689,6 +697,68 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       const categorizer = createStreamingCategorizer(deps.getActiveProvider())
       let streamPosition = 0
 
+      // Read the bilingual settings once for this send. The splitter state is
+      // owned by this send, so later settings changes cannot leak tags into
+      // TTS or pair translations with the wrong turn.
+      const bilingualSnapshot = deps.getBilingualSnapshot?.()
+      const bilingual: BilingualTurnSplitter | undefined = bilingualSnapshot
+        ? createBilingualTurnSplitter(bilingualSnapshot)
+        : undefined
+
+      function appendTextToBuildingMessage(text: string) {
+        buildingMessage.content += text
+        const lastSlice = buildingMessage.slices.at(-1)
+        if (lastSlice?.type === 'text') {
+          lastSlice.text += text
+        }
+        else {
+          buildingMessage.slices.push({
+            type: 'text',
+            text,
+          })
+        }
+      }
+
+      // Routes one splitter event. Spoken text goes to the bubble and to TTS;
+      // translation text goes to the bubble and the subtitle hook only.
+      // Whitespace-only spoken text still reaches the bubble so the projected
+      // message keeps the model's line breaks, but TTS never receives it.
+      async function applyBilingualEvent(event: BilingualTurnEvent): Promise<boolean> {
+        if (event.kind === 'spoken') {
+          appendTextToBuildingMessage(event.text)
+          if (!event.text.trim())
+            return true
+          await hooks.emitTokenLiteralHooks(event.text, streamingMessageContext)
+          return true
+        }
+
+        appendTextToBuildingMessage(event.text)
+        await hooks.emitTokenTranslationHooks({
+          language: event.language,
+          pairId: event.pairId,
+          text: event.text,
+        }, streamingMessageContext)
+        return true
+      }
+
+      async function routeSpeechEvents(text: string) {
+        if (!bilingual) {
+          if (text.trim()) {
+            appendTextToBuildingMessage(text)
+            await hooks.emitTokenLiteralHooks(text, streamingMessageContext)
+            updateStream(sessionId, buildingMessage)
+          }
+          return
+        }
+
+        let bubbleChanged = false
+        for (const event of bilingual.consume(text))
+          bubbleChanged = (await applyBilingualEvent(event)) || bubbleChanged
+
+        if (bubbleChanged)
+          updateStream(sessionId, buildingMessage)
+      }
+
       const parser = useLlmmarkerParser({
         onLiteral: async (literal) => {
           if (shouldAbort())
@@ -699,23 +769,7 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
           const speechOnly = categorizer.filterToSpeech(literal, streamPosition)
           streamPosition += literal.length
 
-          if (speechOnly.trim()) {
-            buildingMessage.content += speechOnly
-
-            await hooks.emitTokenLiteralHooks(speechOnly, streamingMessageContext)
-
-            const lastSlice = buildingMessage.slices.at(-1)
-            if (lastSlice?.type === 'text') {
-              lastSlice.text += speechOnly
-            }
-            else {
-              buildingMessage.slices.push({
-                type: 'text',
-                text: speechOnly,
-              })
-            }
-            updateStream(sessionId, buildingMessage)
-          }
+          await routeSpeechEvents(speechOnly)
         },
         onSpecial: async (special) => {
           if (shouldAbort())
@@ -950,6 +1004,17 @@ export function createChatOrchestratorRuntime(deps: ChatOrchestratorRuntimeDeps)
       await parser.end()
       if (shouldAbort())
         return
+
+      // Release a tag candidate still held at stream end, for example an
+      // unclosed `[EN`. It lands on whichever track was active, so route it
+      // through the normal branches instead of dropping non-spoken bytes.
+      if (bilingual) {
+        let tailChanged = false
+        for (const event of bilingual.end())
+          tailChanged = (await applyBilingualEvent(event)) || tailChanged
+        if (tailChanged)
+          updateStream(sessionId, buildingMessage)
+      }
 
       buildingMessage.providerTranscript = providerTranscript
       deps.onAssistantResponseRendered?.({

@@ -13,7 +13,7 @@ import { defineInvokeHandler } from '@moeru/eventa'
 import { sleep } from '@moeru/std'
 import { createLive2DLipSync } from '@proj-airi/model-driver-lipsync'
 import { wlipsyncProfile } from '@proj-airi/model-driver-lipsync/shared/wlipsync'
-import { createPlaybackManager, createSpeechPipeline, normalizeActPayload } from '@proj-airi/pipelines-audio'
+import { BILINGUAL_LANGUAGES, createPlaybackManager, createSpeechPipeline, normalizeActPayload } from '@proj-airi/pipelines-audio'
 import { defaultLive2DMotionControlDynamics, Live2DScene, useLive2DMotionControl, useLive2dParams, useSettingsLive2d } from '@proj-airi/stage-ui-live2d'
 import { MMDScene } from '@proj-airi/stage-ui-mmd'
 import { SpineScene } from '@proj-airi/stage-ui-spine'
@@ -31,6 +31,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } fr
 
 import StageRenderError from './stage-render-error.vue'
 
+import { useBilingualCaptions } from '../../composables/use-bilingual-captions'
 import { useDuckDb } from '../../composables/use-duck-db'
 import { useIOTraceBridge } from '../../composables/use-io-trace-bridge'
 import { initIOTracer } from '../../composables/use-io-tracer'
@@ -169,7 +170,7 @@ function onVRMInteract(target: VrmInteractionTarget) {
   vrmViewerRef.value?.setExpression(getVrmInteractionExpression(target), 1)
 }
 
-const { onBeforeMessageComposed, onBeforeSend, onTokenLiteral, onTokenSpecial, onStreamEnd, onAssistantResponseEnd } = useChatStore()
+const { onBeforeMessageComposed, onBeforeSend, onTokenLiteral, onTokenTranslation, onTokenSpecial, onStreamEnd, onAssistantResponseEnd } = useChatStore()
 const chatHookCleanups: Array<() => void> = []
 // WORKAROUND: clear previous handlers on unmount to avoid duplicate calls when this component remounts.
 //             We keep per-hook disposers instead of wiping the global chat hooks to play nicely with
@@ -202,6 +203,31 @@ watch([stageModelRenderer, stageModelSelected, stageModelSelectedUrl], () => {
 const { post: postCaption } = useBroadcastChannel<CaptionChannelEvent, CaptionChannelEvent>({ name: 'airi-caption-overlay' })
 const assistantCaption = ref('')
 
+// Bilingual translation captions. The tracker matches translated fragments
+// with TTS playback items per turn; REST items carry turnId, streaming items
+// do not, so the WS session intent is mapped to its turn when it opens.
+const bilingualCaptions = useBilingualCaptions()
+const bilingualLabelsByCode = new Map<string, string>(BILINGUAL_LANGUAGES.map(language => [language.code, language.label]))
+const ttsIntentTurns = new Map<string, string>()
+// Turn owning the current speech surface. Late chunks from an interrupted
+// turn must not repopulate captions after the new turn reset the surface.
+let activeSpeechTurnId: string | undefined
+
+function bilingualLabelFor(code: string): string {
+  return bilingualLabelsByCode.get(code) ?? code
+}
+
+function postCaptionEvents(events: CaptionChannelEvent[]) {
+  for (const event of events) {
+    try {
+      postCaption(event)
+    }
+    catch {
+      // BroadcastChannel may be closed - don't break playback
+    }
+  }
+}
+
 type PresentEvent
   = | { type: 'assistant-reset' }
     | { type: 'assistant-append', text: string }
@@ -225,6 +251,10 @@ function resetAssistantSpeechSurface(source: string) {
   nowSpeaking.value = false
   mouthOpenSize.value = 0
   assistantCaption.value = ''
+
+  ttsIntentTurns.clear()
+  activeSpeechTurnId = undefined
+  postCaptionEvents(bilingualCaptions.resetAll())
 
   try {
     postCaption({ type: 'caption-assistant', text: '' })
@@ -620,6 +650,9 @@ bindSpeakingStateToPlaybackManager(playbackManager, {
     catch {
       // BroadcastChannel may be closed - don't break playback
     }
+    const captionTurnId = item.turnId ?? ttsIntentTurns.get(item.intentId)
+    if (captionTurnId)
+      postCaptionEvents(bilingualCaptions.onPlaybackText(captionTurnId, item.text))
     try {
       postPresent({ type: 'assistant-append', text: item.text })
     }
@@ -847,6 +880,7 @@ watch(speechMuted, (muted) => {
 chatHookCleanups.push(onBeforeMessageComposed(async (_message, context) => {
   playbackManager.stopAll('new-message')
   resetAssistantSpeechSurface('new-message')
+  activeSpeechTurnId = context.turnId
 
   currentSession?.cancel('new-message')
   currentSession = null
@@ -857,14 +891,30 @@ chatHookCleanups.push(onBeforeMessageComposed(async (_message, context) => {
   setupAnalyser()
   await setupLipSync()
   currentSession = openTtsSession(context.turnId)
+  // Streaming playback items lack turnId. Their intent id maps back here so
+  // translation captions align on the bidirectional-ws transport too.
+  ttsIntentTurns.set(currentSession.intentId, context.turnId)
 }))
 
 chatHookCleanups.push(onBeforeSend(async () => {
   currentMotion.value = { group: EmotionThinkMotionName }
 }))
 
-chatHookCleanups.push(onTokenLiteral(async (literal) => {
+chatHookCleanups.push(onTokenLiteral(async (literal, context) => {
+  if (context.turnId !== activeSpeechTurnId)
+    return
+  bilingualCaptions.ingestSpoken(context.turnId, literal)
   currentSession?.appendText(literal)
+}))
+
+chatHookCleanups.push(onTokenTranslation(async (translation, context) => {
+  if (context.turnId !== activeSpeechTurnId)
+    return
+  postCaptionEvents(bilingualCaptions.ingestTranslation(
+    context.turnId,
+    translation,
+    bilingualLabelFor(translation.language),
+  ))
 }))
 
 chatHookCleanups.push(onTokenSpecial(async (special, context) => {
@@ -882,8 +932,12 @@ chatHookCleanups.push(onStreamEnd(async () => {
   currentSession?.finishInput()
 }))
 
-chatHookCleanups.push(onAssistantResponseEnd(async (_message) => {
+chatHookCleanups.push(onAssistantResponseEnd(async (_message, context) => {
   currentSession?.end()
+  // Pairs whose playback never started (a rejected or trimmed TTS item)
+  // publish on turn end. Muted speech shows no caption surface at all.
+  if (!speechMuted.value && context.turnId === activeSpeechTurnId)
+    postCaptionEvents(bilingualCaptions.endTurn(context.turnId))
   // Streaming sessions null-out via the onDone hook; segmenter sessions
   // stay around until the next `onBeforeMessageComposed` cancels them
   // (the segmenter pipeline's IntentHandle.end is idempotent and

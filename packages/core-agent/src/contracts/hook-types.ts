@@ -2,12 +2,28 @@ import type { ToolMessage } from '@xsai/shared-chat'
 
 import type { ChatStreamEventContext, StreamingAssistantMessage } from '../types/chat'
 
+/**
+ * One translated fragment split from a bilingual response.
+ *
+ * The splitter emits these on the subtitle track only. TTS never receives
+ * this text. Fragments with one pair id belong to one spoken sentence.
+ */
+export interface TokenTranslationPayload {
+  /** ISO 639-1 code of the translation language, for example `zh`. */
+  language: string
+  /** Spoken-sentence pair this fragment translates. Ids increase in turn order. */
+  pairId: number
+  /** Raw fragment text, including surrounding whitespace from the model. */
+  text: string
+}
+
 export interface ChatHookRegistry {
   onBeforeMessageComposed: (cb: (message: string, context: Omit<ChatStreamEventContext, 'composedMessage'>) => Promise<void>) => () => void
   onAfterMessageComposed: (cb: (message: string, context: ChatStreamEventContext) => Promise<void>) => () => void
   onBeforeSend: (cb: (message: string, context: ChatStreamEventContext) => Promise<void>) => () => void
   onAfterSend: (cb: (message: string, context: ChatStreamEventContext) => Promise<void>) => () => void
   onTokenLiteral: (cb: (literal: string, context: ChatStreamEventContext) => Promise<void>) => () => void
+  onTokenTranslation: (cb: (translation: TokenTranslationPayload, context: ChatStreamEventContext) => Promise<void>) => () => void
   onTokenSpecial: (cb: (special: string, context: ChatStreamEventContext) => Promise<void>) => () => void
   onStreamEnd: (cb: (context: ChatStreamEventContext) => Promise<void>) => () => void
   onAssistantResponseEnd: (cb: (message: string, context: ChatStreamEventContext) => Promise<void>) => () => void
@@ -18,6 +34,7 @@ export interface ChatHookRegistry {
   emitBeforeSendHooks: (message: string, context: ChatStreamEventContext) => Promise<void>
   emitAfterSendHooks: (message: string, context: ChatStreamEventContext) => Promise<void>
   emitTokenLiteralHooks: (literal: string, context: ChatStreamEventContext) => Promise<void>
+  emitTokenTranslationHooks: (translation: TokenTranslationPayload, context: ChatStreamEventContext) => Promise<void>
   emitTokenSpecialHooks: (special: string, context: ChatStreamEventContext) => Promise<void>
   emitStreamEndHooks: (context: ChatStreamEventContext) => Promise<void>
   emitAssistantResponseEndHooks: (message: string, context: ChatStreamEventContext) => Promise<void>

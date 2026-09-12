@@ -51,6 +51,30 @@ describe('useCaptionItems', () => {
 
   // ROOT CAUSE:
   //
+  // A single-language translation publishes a label badge, then a late
+  // second language republishes without label (names are inline). Keeping the
+  // old label showed a stale badge above the multi-language line.
+  it('removes the label when a replace event carries no label', () => {
+    vi.useFakeTimers()
+
+    try {
+      const captions = useCaptionItems({ ttlMs: 1000 })
+
+      captions.add({ operation: 'replace', type: 'caption-assistant-translation', text: '你好', label: '中文' })
+      expect(captions.items.value[0]?.label).toBe('中文')
+
+      captions.add({ operation: 'replace', type: 'caption-assistant-translation', text: '中文 你好\n日本語 こんにちは' })
+      expect(captions.items.value).toHaveLength(1)
+      expect(captions.items.value[0]?.label).toBeUndefined()
+      expect(captions.items.value[0]?.text).toBe('中文 你好\n日本語 こんにちは')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // ROOT CAUSE:
+  //
   // Streaming providers send a complete volatile sentence on each update.
   // The caption overlay appended every correction as a separate item.
   it('replaces volatile speaker captions without accumulating corrections', () => {

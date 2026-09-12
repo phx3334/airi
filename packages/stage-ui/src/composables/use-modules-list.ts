@@ -16,6 +16,7 @@ import { useSpeechStore } from '../stores/modules/speech'
 import { useTwitterStore } from '../stores/modules/twitter'
 import { useVisionStore } from '../stores/modules/vision'
 import { useWebSearchStore } from '../stores/modules/web-search'
+import { useSettingsBilingualSubtitles } from '../stores/settings/bilingual-subtitles'
 
 export interface Module {
   id: string
@@ -36,6 +37,7 @@ export function useModulesList() {
   const consciousnessStore = useConsciousnessStore()
   const speechStore = useSpeechStore()
   const hearingStore = useHearingStore()
+  const bilingualSubtitlesStore = useSettingsBilingualSubtitles()
   const visionStore = useVisionStore()
   const discordStore = useDiscordStore()
   const twitterStore = useTwitterStore()
@@ -65,6 +67,15 @@ export function useModulesList() {
       icon: 'i-solar:user-speak-rounded-bold-duotone',
       to: '/settings/modules/speech',
       configured: speechStore.configured,
+      category: 'essential',
+    },
+    {
+      id: 'bilingual-subtitles',
+      name: t('settings.pages.modules.bilingual_subtitles.title'),
+      description: t('settings.pages.modules.bilingual_subtitles.description'),
+      icon: 'i-solar:translation-2-bold-duotone',
+      to: '/settings/modules/bilingual-subtitles',
+      configured: bilingualSubtitlesStore.enabled,
       category: 'essential',
     },
     {
