@@ -74,6 +74,21 @@ export function useCaptionItems(options: UseCaptionItemsOptions = {}) {
     }, ttlMs))
   }
 
+  /**
+   * Restarts the expiry countdown of every item with the given type.
+   *
+   * The translation line is produced while the model generates text, which
+   * can be far earlier than the last spoken caption finishes playing. Tie
+   * its lifetime to spoken playback events so it does not disappear midway
+   * through a long response.
+   */
+  function keepTypeAlive(type: CaptionChannelEvent['type']) {
+    for (const item of items.value.filter(candidate => candidate.type === type)) {
+      clearTimer(item.id)
+      scheduleExpiry(item)
+    }
+  }
+
   function replace(event: CaptionChannelEvent) {
     const matchedItems = items.value.filter(item => item.type === event.type)
     const currentItem = matchedItems.at(-1)
@@ -113,17 +128,22 @@ export function useCaptionItems(options: UseCaptionItemsOptions = {}) {
 
     if (event.operation === 'replace') {
       replace(event)
-      return
+    }
+    else {
+      const item: CaptionItem = {
+        id: nextId++,
+        type: event.type,
+        text: event.text,
+        ...(event.label ? { label: event.label } : {}),
+      }
+      items.value = [...items.value, item]
+      scheduleExpiry(item)
     }
 
-    const item: CaptionItem = {
-      id: nextId++,
-      type: event.type,
-      text: event.text,
-      ...(event.label ? { label: event.label } : {}),
-    }
-    items.value = [...items.value, item]
-    scheduleExpiry(item)
+    // Spoken captions arrive while audio plays. Keep the translation line on
+    // screen for as long as the spoken line keeps getting playback updates.
+    if (event.type === 'caption-assistant')
+      keepTypeAlive('caption-assistant-translation')
   }
 
   function dispose() {
@@ -138,6 +158,7 @@ export function useCaptionItems(options: UseCaptionItemsOptions = {}) {
     items: readonly(items),
     add,
     clearType,
+    keepTypeAlive,
     dispose,
   }
 }

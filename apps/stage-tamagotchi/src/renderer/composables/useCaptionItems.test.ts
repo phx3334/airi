@@ -51,6 +51,38 @@ describe('useCaptionItems', () => {
 
   // ROOT CAUSE:
   //
+  // Translation text is generated before long speech finishes. Its own TTL
+  // expired midway through playback and the line vanished while the spoken
+  // captions stayed. Spoken playback events must refresh its countdown.
+  it('keeps the translation line alive while spoken captions keep arriving', () => {
+    vi.useFakeTimers()
+
+    try {
+      const captions = useCaptionItems({ ttlMs: 1000 })
+
+      captions.add({ operation: 'replace', type: 'caption-assistant-translation', text: '你好' })
+      vi.advanceTimersByTime(800)
+      // Spoken sentence 1 plays 0.8s after the translation was generated.
+      captions.add({ type: 'caption-assistant', text: 'Hello' })
+      vi.advanceTimersByTime(800)
+      expect(captions.items.value.map(item => item.type)).toContain('caption-assistant-translation')
+
+      // Another spoken sentence refreshes it again.
+      captions.add({ type: 'caption-assistant', text: 'world' })
+      vi.advanceTimersByTime(800)
+      expect(captions.items.value.map(item => item.type)).toContain('caption-assistant-translation')
+
+      // It expires only after speech stops arriving for the full TTL.
+      vi.advanceTimersByTime(1000)
+      expect(captions.items.value.map(item => item.type)).not.toContain('caption-assistant-translation')
+    }
+    finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // ROOT CAUSE:
+  //
   // A single-language translation publishes a label badge, then a late
   // second language republishes without label (names are inline). Keeping the
   // old label showed a stale badge above the multi-language line.

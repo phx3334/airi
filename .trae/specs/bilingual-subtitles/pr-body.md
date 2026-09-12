@@ -18,11 +18,13 @@ On the alternative suggested in the #2487 discussion (reuse `stripNarrative` / b
 - `pipelines-audio`: `createBilingualTurnSplitter` — bounded prefix hold-back (max 4 chars), markdown-link/array-index/unknown-tag passthrough, case-sensitive tags, EOF-safe flush, 12-language table.
 - `core-agent`: optional `getBilingualSnapshot` per-send dep; spoken/translation split after the speech categorizer; spoken keeps the existing literal hook (TTS + bubble + history), translation goes only to the isolated `onTokenTranslation` hook; control tags never reach TTS, the bubble, or stored messages.
 - `stage-ui`: `useBilingualCaptions` tracker pairs translation fragments with ordered playback items (multi-item sentences, whole-turn buffered items, late translations, punctuation tolerance, turn-end flush for rejected TTS); settings store (non-synced) with reset registration; prompt instruction joined into the existing runtime-prompt context; Stage.vue thin wiring (~50 net lines).
+- Spark reactions supported: the bilingual instruction is appended to the spark-notify request as a system instruction, the character store splits each reaction from a per-reaction snapshot (spoken → TTS + reaction history, translated → captions), and chat/spark share one process-wide `useBilingualCaptionBus`.
+- Caption lifetime: spoken playback events refresh the translation line's TTL, so long responses no longer drop translations before speech finishes.
 - Settings: new Modules → Bilingual subtitles page (spoken + two subtitle languages, voice-language warning); module grid entry.
 - `stage-shared`: `caption-assistant-translation` event type with optional language label.
 - `stage-tamagotchi`: caption window renders a smaller translated line with a language badge (inline names for two languages); unified broadcast watch.
 
-Out of scope: spark reaction path, stage-web/pocket overlay UI, automatic voice switching, `stripNarrative` activation, history backfill.
+Out of scope: stage-web/pocket overlay UI, automatic voice switching, `stripNarrative` activation, history backfill.
 
 ## Verification
 

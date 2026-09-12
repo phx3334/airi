@@ -10,6 +10,7 @@ import { useAiriRuntimePrompt } from '../../../composables/use-airi-runtime-prom
 import { useLLM } from '../../ai/chat-llm/llm'
 import { useModsServerChannelStore } from '../../mods/api/channel-server'
 import { useConsciousnessStore } from '../../modules/consciousness'
+import { useSettingsBilingualSubtitles } from '../../settings/bilingual-subtitles'
 
 export { sparkNotifyCommandSchema } from '@proj-airi/core-agent/agents/spark-notify'
 
@@ -21,6 +22,7 @@ export const useCharacterOrchestratorStore = defineStore('character-orchestrator
   const notebookStore = useCharacterNotebookStore()
   const { systemPrompt } = storeToRefs(characterStore)
   const runtimePrompt = useAiriRuntimePrompt()
+  const bilingualSettings = useSettingsBilingualSubtitles()
   const modsServerChannelStore = useModsServerChannelStore()
 
   const processing = ref(false)
@@ -127,6 +129,23 @@ export const useCharacterOrchestratorStore = defineStore('character-orchestrator
     processing.value = true
 
     try {
+      // In bilingual mode the reaction must follow the same tagged format as
+      // chat replies. Append the instruction as a system instruction while
+      // preserving any caller-provided message override.
+      const bilingualInstruction = bilingualSettings.instruction()
+      const effectiveControl: SparkNotifyResponseControl | undefined = bilingualInstruction
+        ? {
+            ...control,
+            messageOverride: {
+              ...control?.messageOverride,
+              appendSystemInstructions: [
+                ...(control?.messageOverride?.appendSystemInstructions ?? []),
+                bilingualInstruction,
+              ],
+            },
+          }
+        : control
+
       const result = await sparkNotifyAgent.handle({
         event,
         selectedChat: {
@@ -136,7 +155,7 @@ export const useCharacterOrchestratorStore = defineStore('character-orchestrator
         },
         systemPrompt: systemPrompt.value,
         runtimePrompt: runtimePrompt.value,
-        control,
+        control: effectiveControl,
       })
       if (!result.commands.length)
         return result

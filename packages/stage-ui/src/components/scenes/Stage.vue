@@ -13,7 +13,7 @@ import { defineInvokeHandler } from '@moeru/eventa'
 import { sleep } from '@moeru/std'
 import { createLive2DLipSync } from '@proj-airi/model-driver-lipsync'
 import { wlipsyncProfile } from '@proj-airi/model-driver-lipsync/shared/wlipsync'
-import { BILINGUAL_LANGUAGES, createPlaybackManager, createSpeechPipeline, normalizeActPayload } from '@proj-airi/pipelines-audio'
+import { createPlaybackManager, createSpeechPipeline, normalizeActPayload } from '@proj-airi/pipelines-audio'
 import { defaultLive2DMotionControlDynamics, Live2DScene, useLive2DMotionControl, useLive2dParams, useSettingsLive2d } from '@proj-airi/stage-ui-live2d'
 import { MMDScene } from '@proj-airi/stage-ui-mmd'
 import { SpineScene } from '@proj-airi/stage-ui-spine'
@@ -31,7 +31,6 @@ import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } fr
 
 import StageRenderError from './stage-render-error.vue'
 
-import { useBilingualCaptions } from '../../composables/use-bilingual-captions'
 import { useDuckDb } from '../../composables/use-duck-db'
 import { useIOTraceBridge } from '../../composables/use-io-trace-bridge'
 import { initIOTracer } from '../../composables/use-io-tracer'
@@ -41,6 +40,7 @@ import { getDefinedProvider } from '../../libs/providers/providers'
 import { OFFICIAL_SPEECH_PROVIDER_ID, OFFICIAL_SPEECH_STREAMING_PROVIDER_ID } from '../../libs/providers/providers/official'
 import { bindSpeakingStateToPlaybackManager } from '../../libs/speech/playback-speaking-state'
 import { createStageTtsSession } from '../../libs/speech/tts-session'
+import { useBilingualCaptionBus } from '../../services/bilingual-captions'
 import { getSpeechBusContext, speechOutputGetPlaybackState } from '../../services/speech/bus'
 import { useLlmStreamingControlStore } from '../../stores/ai/chat-llm/streaming-control'
 import { useAudioContext, useSpeakingStore } from '../../stores/audio'
@@ -203,30 +203,12 @@ watch([stageModelRenderer, stageModelSelected, stageModelSelectedUrl], () => {
 const { post: postCaption } = useBroadcastChannel<CaptionChannelEvent, CaptionChannelEvent>({ name: 'airi-caption-overlay' })
 const assistantCaption = ref('')
 
-// Bilingual translation captions. The tracker matches translated fragments
-// with TTS playback items per turn; REST items carry turnId, streaming items
-// do not, so the WS session intent is mapped to its turn when it opens.
-const bilingualCaptions = useBilingualCaptions()
-const bilingualLabelsByCode = new Map<string, string>(BILINGUAL_LANGUAGES.map(language => [language.code, language.label]))
-const ttsIntentTurns = new Map<string, string>()
+// Shared bilingual caption bus. Both chat turns and spark reactions route
+// their translated fragments and playback items through this single owner.
+const bilingualCaptionBus = useBilingualCaptionBus()
 // Turn owning the current speech surface. Late chunks from an interrupted
 // turn must not repopulate captions after the new turn reset the surface.
 let activeSpeechTurnId: string | undefined
-
-function bilingualLabelFor(code: string): string {
-  return bilingualLabelsByCode.get(code) ?? code
-}
-
-function postCaptionEvents(events: CaptionChannelEvent[]) {
-  for (const event of events) {
-    try {
-      postCaption(event)
-    }
-    catch {
-      // BroadcastChannel may be closed - don't break playback
-    }
-  }
-}
 
 type PresentEvent
   = | { type: 'assistant-reset' }
@@ -252,9 +234,8 @@ function resetAssistantSpeechSurface(source: string) {
   mouthOpenSize.value = 0
   assistantCaption.value = ''
 
-  ttsIntentTurns.clear()
   activeSpeechTurnId = undefined
-  postCaptionEvents(bilingualCaptions.resetAll())
+  bilingualCaptionBus.resetAll()
 
   try {
     postCaption({ type: 'caption-assistant', text: '' })
@@ -650,9 +631,7 @@ bindSpeakingStateToPlaybackManager(playbackManager, {
     catch {
       // BroadcastChannel may be closed - don't break playback
     }
-    const captionTurnId = item.turnId ?? ttsIntentTurns.get(item.intentId)
-    if (captionTurnId)
-      postCaptionEvents(bilingualCaptions.onPlaybackText(captionTurnId, item.text))
+    bilingualCaptionBus.routePlaybackItem(item)
     try {
       postPresent({ type: 'assistant-append', text: item.text })
     }
@@ -893,7 +872,7 @@ chatHookCleanups.push(onBeforeMessageComposed(async (_message, context) => {
   currentSession = openTtsSession(context.turnId)
   // Streaming playback items lack turnId. Their intent id maps back here so
   // translation captions align on the bidirectional-ws transport too.
-  ttsIntentTurns.set(currentSession.intentId, context.turnId)
+  bilingualCaptionBus.mapIntentToTurn(currentSession.intentId, context.turnId)
 }))
 
 chatHookCleanups.push(onBeforeSend(async () => {
@@ -903,18 +882,14 @@ chatHookCleanups.push(onBeforeSend(async () => {
 chatHookCleanups.push(onTokenLiteral(async (literal, context) => {
   if (context.turnId !== activeSpeechTurnId)
     return
-  bilingualCaptions.ingestSpoken(context.turnId, literal)
+  bilingualCaptionBus.ingestSpoken(context.turnId, literal)
   currentSession?.appendText(literal)
 }))
 
 chatHookCleanups.push(onTokenTranslation(async (translation, context) => {
   if (context.turnId !== activeSpeechTurnId)
     return
-  postCaptionEvents(bilingualCaptions.ingestTranslation(
-    context.turnId,
-    translation,
-    bilingualLabelFor(translation.language),
-  ))
+  bilingualCaptionBus.ingestTranslation(context.turnId, translation)
 }))
 
 chatHookCleanups.push(onTokenSpecial(async (special, context) => {
@@ -937,7 +912,7 @@ chatHookCleanups.push(onAssistantResponseEnd(async (_message, context) => {
   // Pairs whose playback never started (a rejected or trimmed TTS item)
   // publish on turn end. Muted speech shows no caption surface at all.
   if (!speechMuted.value && context.turnId === activeSpeechTurnId)
-    postCaptionEvents(bilingualCaptions.endTurn(context.turnId))
+    bilingualCaptionBus.endTurn(context.turnId)
   // Streaming sessions null-out via the onDone hook; segmenter sessions
   // stay around until the next `onBeforeMessageComposed` cancels them
   // (the segmenter pipeline's IntentHandle.end is idempotent and

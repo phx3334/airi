@@ -163,6 +163,7 @@ LLM text-delta
 * `src/renderer/pages/caption.vue`：
 
   * 增加 `caption-assistant-translation` 第三行：较小字号、中性色、可选语言标签徽章（UnoCSS 规则：禁止长内联工具串，用 class 数组分组——#2487 已被要求过同样修改）。
+  * 译文字幕 TTL 锚定语音播放：每条 `caption-assistant` 播放事件刷新译文行过期计时，长回复期间译文不再先于口语消失；语音停止一个 TTL 后正常清行。
 
   * watch 分支简化为统一 `addCaptionItem(event)`。
 
@@ -178,9 +179,9 @@ LLM text-delta
 
 * 一个最小对比例子（EN/ZH 快照时）。
 
-## 6. 明确不做（v1 边界）
+## 6. 边界
 
-1. spark-notify reaction 路径：双语指令只进 chat runtime prompt，spark 不收到指令→不会产出标签→无需解析（#2487 约三分之一状态机因此删除）。后续 PR 用同一 splitter 复用。
+1. ~~spark-notify reaction 路径不做~~ **已覆盖**：reaction 请求经 `control.messageOverride.appendSystemInstructions` 注入同一指令；character store 每个 reaction 取一次快照建 splitter——spoken 喂 marker parser/TTS 且作为 `reaction.message` 投影，translation 只进共享字幕总线；spark 播放项自带 `turnId: spark:<eventId>` 用于配对；流结束 endTurn 冲刷未播放 pair；新 reaction interrupt 时清上一条 spark 字幕。chat 与 spark 共用 `useBilingualCaptionBus` 单例（tracker + caption 广播，懒创建 channel 以兼容测试）。
 2. stage-web / stage-pocket 的字幕 overlay UI（契约与纯逻辑共享，端侧 UI 后续补；web 当前无任何 caption 消费方）。
 3. 按语言自动切换 TTS 音色（改为设置页兼容性警告）。
 4. 启用 `stripNarrative` 旁白剥离（独立 PR）。
